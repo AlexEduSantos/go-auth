@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  # Serviço do Banco de Dados PostgreSQL
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: go_admin
+      POSTGRES_PASSWORD: go_password
+      POSTGRES_DB: go_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d # <--- Essencial para rodar o init.sql
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U go_admin -d go_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Serviço da Aplicação Go
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: go_app
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=go_admin
+      - DB_PASSWORD=go_password
+      - DB_NAME=go_db
+      - DB_SSLMODE=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - default
+
+volumes:
+  pgdata:
+
+networks:
+  default:
+    driver: bridge
