@@ -8,8 +8,12 @@ import (
 	"os"
 
 	"github.com/AlexEduSantos/go-auth/internal/handlers"
+	"github.com/AlexEduSantos/go-auth/internal/middleware"
 	"github.com/AlexEduSantos/go-auth/internal/repository"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/time/rate"
+
+	"time"
 )
 
 func main() {
@@ -37,11 +41,18 @@ func main() {
 
 	// Inicializa dependências (Clean Architecture básica)
 	userRepo := repository.NewUserRepository(dbPool)
-	authHandler := handlers.NewAuthHandler(userRepo)
+	sessionRepo := repository.NewSessionRepository(dbPool)
+	authHandler := handlers.NewAuthHandler(userRepo, sessionRepo)
+	repository.StartSessionCleanup(ctx, sessionRepo, 1*time.Hour)
 
-	// Configura as rotas
+	limiter := middleware.NewIPRateLimiter(rate.Every(5*time.Second), 5)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/register", authHandler.Register)
+
+	mux.HandleFunc("POST /api/register", authHandler.Register)
+	mux.HandleFunc("POST /api/login", limiter.Middleware(authHandler.Login))
+	mux.HandleFunc("POST /api/forgot-password", limiter.Middleware(authHandler.ForgotPassword))
+	mux.HandleFunc("POST /api/reset-password", limiter.Middleware(authHandler.ResetPassword))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("API rodando perfeitamente!"))
