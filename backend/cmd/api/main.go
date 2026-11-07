@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/AlexEduSantos/go-auth/internal/database"
+	"github.com/AlexEduSantos/go-auth/internal/docs"
 	"github.com/AlexEduSantos/go-auth/internal/handlers"
+	"github.com/AlexEduSantos/go-auth/internal/logger"
 	"github.com/AlexEduSantos/go-auth/internal/middleware"
 	"github.com/AlexEduSantos/go-auth/internal/repository"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,7 +40,18 @@ func main() {
 	if err = dbPool.Ping(ctx); err != nil {
 		log.Fatalf("Erro ao conectar com o banco de dados: %v\n", err)
 	}
-	fmt.Println("Conexão com o PostgreSQL estabelecida com sucesso!")
+
+	// Inicializa o logger estruturado (Terminal + PostgreSQL) e a rotina de limpeza (retenção de 30 dias)
+	logger.InitLogger(dbPool)
+
+	// Executa migrações versionadas embutidas no binário automaticamente ao subir a aplicação
+	if err := database.RunMigrations(ctx, dbPool); err != nil {
+		logger.Log.Error("Falha ao executar migrações do banco", "error", err.Error())
+		log.Fatalf("Erro nas migrações: %v\n", err)
+	}
+
+	logger.StartLogCleanup(ctx, dbPool, 24*time.Hour, 30)
+	logger.Log.Info("Conexão com o PostgreSQL estabelecida com sucesso!")
 
 	// Inicializa dependências (Clean Architecture básica)
 	userRepo := repository.NewUserRepository(dbPool)
@@ -49,17 +63,32 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /api/register", authHandler.Register)
+	// Rotas de Autenticação e Segurança
+	mux.HandleFunc("GET /api/csrf-token", limiter.Middleware(middleware.CSRFTokenHandler))
+	mux.HandleFunc("POST /api/register", limiter.Middleware(authHandler.Register))
 	mux.HandleFunc("POST /api/login", limiter.Middleware(authHandler.Login))
+	mux.HandleFunc("POST /api/refresh", limiter.Middleware(authHandler.Refresh))
+	mux.HandleFunc("POST /api/logout", limiter.Middleware(middleware.AuthMiddleware(authHandler.Logout)))
 	mux.HandleFunc("POST /api/forgot-password", limiter.Middleware(authHandler.ForgotPassword))
 	mux.HandleFunc("POST /api/reset-password", limiter.Middleware(authHandler.ResetPassword))
+
+	// Documentação Interativa Swagger (OpenAPI 3.0)
+	mux.HandleFunc("GET /swagger", docs.SwaggerUIHandler)
+	mux.HandleFunc("GET /openapi.json", docs.OpenAPIHandler)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("API rodando perfeitamente!"))
 	})
 
-	fmt.Println("Servidor rodando na porta 8080...")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	// Envolve todas as rotas com Security Headers, Proteção CSRF (Double Submit Cookie) e Request Logger
+	securedMux := middleware.SecurityHeaders(
+		middleware.CSRFMiddleware(
+			middleware.RequestLogger(mux),
+		),
+	)
+
+	logger.Log.Info("Servidor rodando na porta 8080...")
+	if err := http.ListenAndServe(":8080", securedMux); err != nil {
 		log.Fatalf("Erro ao iniciar servidor: %v", err)
 	}
 }

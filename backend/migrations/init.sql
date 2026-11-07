@@ -25,3 +25,16 @@ CREATE TABLE IF NOT EXISTS session (
 
 -- Índice para performance na expiração de sessões
 CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON session (expire);
+
+-- Tabela de Logs Estruturados (slog)
+CREATE TABLE IF NOT EXISTS app_logs (
+    id BIGSERIAL PRIMARY KEY,
+    level VARCHAR(20) NOT NULL,
+    message TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Índices para busca rápida no JSON e limpeza por data
+CREATE INDEX IF NOT EXISTS idx_app_logs_payload ON app_logs USING GIN (payload);
+CREATE INDEX IF NOT EXISTS idx_app_logs_created_at ON app_logs (created_at);

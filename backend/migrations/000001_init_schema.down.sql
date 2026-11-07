@@ -1,0 +1,4 @@
+DROP INDEX IF EXISTS "IDX_session_expire";
+DROP TABLE IF EXISTS session;
+DROP TABLE IF EXISTS users;
+DROP TYPE IF EXISTS user_role;
