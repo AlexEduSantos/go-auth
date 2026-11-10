@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -107,14 +109,15 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := &models.User{
-		Username: req.Username,
-		Name:     req.Name,
-		Email:    req.Email,
-		Password: string(hashedPassword),
-		Role:     role,
+		Username:   req.Username,
+		Name:       req.Name,
+		Email:      req.Email,
+		Password:   string(hashedPassword),
+		Role:       role,
+		IsVerified: false,
 	}
 
-	// Salva no banco de dados
+	// Salva no banco de dados (com is_verified = false)
 	err = h.userRepo.Create(r.Context(), user)
 	if err != nil {
 		slog.Warn("Falha ao registrar usuário (conflito)",
@@ -127,17 +130,93 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("Novo usuário registrado",
+	// 3. Double Opt-In: gera token de confirmação de e-mail válido por 24 horas
+	verifyToken, err := generateRandomToken()
+	if err != nil {
+		http.Error(w, "Erro ao gerar token de verificação de e-mail", http.StatusInternalServerError)
+		return
+	}
+	verifyExpiresAt := time.Now().Add(24 * time.Hour)
+
+	if err := h.userRepo.SaveVerificationToken(r.Context(), user.ID, verifyToken, verifyExpiresAt); err != nil {
+		slog.Error("Erro ao salvar token de verificação de e-mail",
+			slog.String("user_id", user.ID),
+			slog.String("error", err.Error()),
+		)
+		http.Error(w, "Erro ao salvar token de verificação", http.StatusInternalServerError)
+		return
+	}
+
+	verifyLink := fmt.Sprintf("https://localhost:3000/api/verify?token=%s", verifyToken)
+
+	slog.Info("Novo usuário registrado (aguardando confirmação de e-mail)",
 		slog.String("user_id", user.ID),
 		slog.String("username", user.Username),
 		slog.String("role", string(user.Role)),
 	)
 
-	// Retorna o usuário criado com status 201 (Created)
-	// Nota: O campo Password tem a tag `json:"-"` no model, logo não será exposto na resposta
+	// NOTA REAL: Aqui você integraria o serviço de envio de e-mail (SMTP / Resend / SendGrid) com verifyLink.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(user)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":           "Registo efetuado! Por favor, confirme o seu e-mail através do link enviado.",
+		"user":              user,
+		"verification_link": verifyLink, // Exposto para facilitar testes em desenvolvimento
+	})
+}
+
+// VerifyEmail confirma o registo do utilizador (Double Opt-In) via GET (?token=XYZ) ou POST JSON.
+// @Summary      Confirmar e-mail de registo (Double Opt-In)
+// @Description  Valida o token de verificação enviado por e-mail e ativa a conta do utilizador (is_verified = true).
+// @Tags         Auth
+// @Accept       json
+// @Produce      json
+// @Param        token  query     string  false  "Token de verificação de e-mail"
+// @Success      200    {object}  map[string]string
+// @Failure      400    {string}  string  "Token ausente, inválido ou expirado"
+// @Router       /api/verify [get]
+func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+
+	// Se não veio na query string e for POST, tenta ler do body JSON {"token": "..."}
+	if token == "" && r.Method == http.MethodPost {
+		var body struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			token = strings.TrimSpace(body.Token)
+		}
+	}
+
+	if token == "" {
+		http.Error(w, "Token de verificação não informado", http.StatusBadRequest)
+		return
+	}
+
+	userID, err := h.userRepo.VerifyUserByToken(r.Context(), token)
+	if err != nil {
+		slog.Warn("Tentativa de verificação de e-mail com token inválido ou expirado",
+			slog.String("ip", r.RemoteAddr),
+		)
+		http.Error(w, "Token de verificação inválido ou expirado", http.StatusBadRequest)
+		return
+	}
+
+	slog.Info("E-mail do utilizador confirmado com sucesso (Double Opt-In)",
+		slog.String("user_id", userID),
+		slog.String("ip", r.RemoteAddr),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "E-mail confirmado com sucesso! Já pode efetuar o login.",
+	})
 }
 
 var jwtSecret = []byte("sua_chave_secreta_super_segura_aqui")
@@ -215,6 +294,17 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 			slog.String("ip", r.RemoteAddr),
 		)
 		http.Error(w, "Credenciais inválidas", http.StatusUnauthorized)
+		return
+	}
+
+	// Verifica se o utilizador já confirmou o e-mail (Double Opt-In)
+	if !user.IsVerified {
+		slog.Warn("Tentativa de login bloqueada: e-mail ainda não confirmado",
+			slog.String("user_id", user.ID),
+			slog.String("email", user.Email),
+			slog.String("ip", r.RemoteAddr),
+		)
+		http.Error(w, "Por favor, confirme seu e-mail antes de entrar", http.StatusForbidden)
 		return
 	}
 
@@ -562,13 +652,262 @@ func validatePasswordStrength(password string) error {
 	return nil
 }
 
-// Função auxiliar para gerar um token aleatório seguro
+// Função auxiliar para gerar um token aleatório seguro (64 caracteres hex)
 func generateRandomToken() (string, error) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+// Função auxiliar para gerar um código numérico OTP de 6 dígitos criptograficamente seguro
+func generateOTPCode() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", n.Int64()), nil
+}
+
+type MagicLinkRequest struct {
+	Identifier string `json:"identifier"` // Email ou username
+}
+
+type VerifyOTPRequest struct {
+	Identifier string `json:"identifier"` // Email ou username (opcional quando usar magic_token)
+	Code       string `json:"code"`       // Código OTP de 6 dígitos ou magic_token
+	Token      string `json:"token"`      // Alternativa para enviar o magic_token via JSON
+}
+
+// RequestMagicLink inicia o fluxo Passwordless gerando um OTP de 6 dígitos e um Magic Link com validade de 10 minutos.
+// @Summary      Solicitar Magic Link / Código OTP (Passwordless)
+// @Description  Gera um código numérico de 6 dígitos (OTP) e um Magic Link com validade de 10 minutos para login sem senha.
+// @Tags         Passwordless
+// @Accept       json
+// @Produce      json
+// @Param        request  body      MagicLinkRequest  true  "E-mail ou Username"
+// @Success      200      {object}  map[string]string
+// @Failure      400      {string}  string  "Formato inválido"
+// @Router       /api/auth/magic-link [post]
+func (h *AuthHandler) RequestMagicLink(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req MagicLinkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Payload JSON inválido", http.StatusBadRequest)
+		return
+	}
+
+	req.Identifier = strings.TrimSpace(req.Identifier)
+	if req.Identifier == "" {
+		http.Error(w, "Informe o e-mail ou username", http.StatusBadRequest)
+		return
+	}
+
+	if strings.Contains(req.Identifier, "@") {
+		req.Identifier = strings.ToLower(req.Identifier)
+		if err := validateEmail(req.Identifier); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		if err := validateUsername(req.Identifier); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	user, err := h.userRepo.FindByIdentifier(r.Context(), req.Identifier)
+	if err != nil {
+		// Por segurança (evitar enumeração de utilizadores), retornamos mensagem genérica
+		slog.Warn("Solicitação de Magic Link para utilizador não encontrado",
+			slog.String("identifier", req.Identifier),
+			slog.String("ip", r.RemoteAddr),
+		)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Se a conta existir, um código OTP e um Magic Link foram enviados para o seu e-mail.",
+		})
+		return
+	}
+
+	otpCode, err := generateOTPCode()
+	if err != nil {
+		http.Error(w, "Erro ao gerar código OTP", http.StatusInternalServerError)
+		return
+	}
+
+	magicToken, err := generateRandomToken()
+	if err != nil {
+		http.Error(w, "Erro ao gerar Magic Link", http.StatusInternalServerError)
+		return
+	}
+
+	expiresAt := time.Now().Add(10 * time.Minute)
+	if err := h.userRepo.SavePasswordlessToken(r.Context(), user.ID, otpCode, magicToken, expiresAt); err != nil {
+		slog.Error("Erro ao salvar token passwordless",
+			slog.String("user_id", user.ID),
+			slog.String("error", err.Error()),
+		)
+		http.Error(w, "Erro ao processar solicitação passwordless", http.StatusInternalServerError)
+		return
+	}
+
+	magicLink := fmt.Sprintf("https://localhost:3000/api/auth/verify-otp?token=%s", magicToken)
+
+	slog.Info("Código OTP e Magic Link gerados com sucesso",
+		slog.String("user_id", user.ID),
+		slog.String("ip", r.RemoteAddr),
+	)
+
+	// NOTA REAL: Aqui você enviaria o e-mail contendo o otpCode (6 dígitos) e o magicLink.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"message":          "Se a conta existir, um código OTP e um Magic Link foram enviados para o seu e-mail.",
+		"debug_otp":        otpCode,   // Exposto para testes em desenvolvimento
+		"debug_magic_link": magicLink, // Exposto para testes em desenvolvimento
+	})
+}
+
+// VerifyOTP valida o código OTP de 6 dígitos (ou o Magic Link), invalida o código usado e autentica o utilizador
+// emitindo os mesmos cookies HttpOnly (auth_token, refresh_token) e csrf_token do login tradicional.
+// @Summary      Validar OTP ou Magic Link e Autenticar (Passwordless)
+// @Description  Valida o código de 6 dígitos ou o token do Magic Link, consome o código no banco e emite a sessão com cookies HttpOnly.
+// @Tags         Passwordless
+// @Accept       json
+// @Produce      json
+// @Param        token    query     string            false  "Token do Magic Link (quando acessado via GET)"
+// @Param        request  body      VerifyOTPRequest  false  "Identifier + Código OTP de 6 dígitos (quando enviado via POST)"
+// @Success      200      {object}  map[string]interface{}
+// @Failure      400      {string}  string  "Dados ausentes"
+// @Failure      401      {string}  string  "Código OTP ou Magic Link inválido/expirado"
+// @Router       /api/auth/verify-otp [post]
+func (h *AuthHandler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	identifier := strings.TrimSpace(r.URL.Query().Get("identifier"))
+	codeOrToken := strings.TrimSpace(r.URL.Query().Get("token"))
+
+	if r.Method == http.MethodPost {
+		var req VerifyOTPRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			if req.Identifier != "" {
+				identifier = strings.TrimSpace(req.Identifier)
+			}
+			if req.Code != "" {
+				codeOrToken = strings.TrimSpace(req.Code)
+			} else if req.Token != "" {
+				codeOrToken = strings.TrimSpace(req.Token)
+			}
+		}
+	}
+
+	if strings.Contains(identifier, "@") {
+		identifier = strings.ToLower(identifier)
+	}
+
+	if codeOrToken == "" {
+		http.Error(w, "Informe o código OTP ou o token do Magic Link", http.StatusBadRequest)
+		return
+	}
+
+	// Se for um código curto (OTP de 6 dígitos), o identifier (email/username) é obrigatório
+	if len(codeOrToken) == 6 && identifier == "" {
+		http.Error(w, "Informe o e-mail ou username juntamente com o código OTP de 6 dígitos", http.StatusBadRequest)
+		return
+	}
+
+	user, err := h.userRepo.ConsumePasswordlessToken(r.Context(), identifier, codeOrToken)
+	if err != nil {
+		slog.Warn("Tentativa de login Passwordless inválida ou expirada",
+			slog.String("identifier", identifier),
+			slog.String("ip", r.RemoteAddr),
+		)
+		http.Error(w, "Código OTP ou Magic Link inválido ou expirado", http.StatusUnauthorized)
+		return
+	}
+
+	// Emite a sessão no PostgreSQL e os cookies HttpOnly exatamente como no Login tradicional
+	sid, err := generateRandomToken()
+	if err != nil {
+		http.Error(w, "Erro ao criar sessão", http.StatusInternalServerError)
+		return
+	}
+
+	sessionDataMap := map[string]interface{}{
+		"user_id": user.ID,
+		"email":   user.Email,
+		"role":    user.Role,
+	}
+	sessionJSON, _ := json.Marshal(sessionDataMap)
+	refreshExpiresAt := time.Now().Add(RefreshTokenDuration)
+
+	if err := h.sessionRepo.Save(r.Context(), sid, sessionJSON, refreshExpiresAt); err != nil {
+		http.Error(w, "Erro ao salvar sessão no banco", http.StatusInternalServerError)
+		return
+	}
+
+	accessExpiresAt := time.Now().Add(AccessTokenDuration)
+	claims := jwt.MapClaims{
+		"sid":   sid,
+		"sub":   user.ID,
+		"email": user.Email,
+		"role":  user.Role,
+		"exp":   accessExpiresAt.Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(jwtSecret)
+	if err != nil {
+		http.Error(w, "Erro ao gerar token de autenticação", http.StatusInternalServerError)
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "auth_token",
+		Value:    tokenString,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  accessExpiresAt,
+	})
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    sid,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  refreshExpiresAt,
+	})
+
+	csrfToken, _ := middleware.SetCSRFCookie(w)
+
+	slog.Info("Login Passwordless (OTP/Magic Link) efetuado com sucesso",
+		slog.String("user_id", user.ID),
+		slog.String("role", string(user.Role)),
+		slog.String("sid", sid),
+		slog.String("ip", r.RemoteAddr),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":    "Autenticação Passwordless efetuada com sucesso!",
+		"user":       user,
+		"csrf_token": csrfToken,
+	})
 }
 
 type ForgotPasswordRequest struct {

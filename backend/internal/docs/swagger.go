@@ -55,6 +55,21 @@ const openAPISpec = `{
           "password": { "type": "string", "format": "password", "example": "SenhaForte@123" }
         }
       },
+      "MagicLinkRequest": {
+        "type": "object",
+        "required": ["identifier"],
+        "properties": {
+          "identifier": { "type": "string", "description": "Email ou Username", "example": "alex@exemplo.com" }
+        }
+      },
+      "VerifyOTPRequest": {
+        "type": "object",
+        "properties": {
+          "identifier": { "type": "string", "description": "Email ou Username", "example": "alex@exemplo.com" },
+          "code": { "type": "string", "description": "Código numérico de 6 dígitos (OTP)", "example": "482910" },
+          "token": { "type": "string", "description": "Token do Magic Link (alternativa ao OTP)" }
+        }
+      },
       "ForgotPasswordRequest": {
         "type": "object",
         "required": ["email"],
@@ -78,6 +93,7 @@ const openAPISpec = `{
           "name": { "type": "string" },
           "email": { "type": "string" },
           "role": { "type": "string" },
+          "is_verified": { "type": "boolean" },
           "created_at": { "type": "string", "format": "date-time" },
           "updated_at": { "type": "string", "format": "date-time" }
         }
@@ -122,6 +138,47 @@ const openAPISpec = `{
         }
       }
     },
+    "/api/verify": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "Confirmar e-mail de registo (Double Opt-In)",
+        "description": "Valida o token de verificação enviado por e-mail (?token=XYZ) e atualiza is_verified = true no utilizador.",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "E-mail confirmado com sucesso" },
+          "400": { "description": "Token ausente, inválido ou expirado" }
+        }
+      },
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Confirmar e-mail de registo via JSON (Double Opt-In)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["token"],
+                "properties": {
+                  "token": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "E-mail confirmado com sucesso" },
+          "400": { "description": "Token ausente, inválido ou expirado" }
+        }
+      }
+    },
     "/api/login": {
       "post": {
         "tags": ["Auth"],
@@ -138,7 +195,63 @@ const openAPISpec = `{
         "responses": {
           "200": { "description": "Login efetuado com sucesso" },
           "400": { "description": "Formato inválido" },
-          "401": { "description": "Credenciais inválidas" }
+          "401": { "description": "Credenciais inválidas" },
+          "403": { "description": "E-mail ainda não confirmado (Double Opt-In)" }
+        }
+      }
+    },
+    "/api/auth/magic-link": {
+      "post": {
+        "tags": ["Passwordless"],
+        "summary": "Solicitar Código OTP (6 dígitos) ou Magic Link",
+        "description": "Gera um código numérico de 6 dígitos (OTP) e um Magic Link com validade de 10 minutos associados ao utilizador.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MagicLinkRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Código OTP / Magic Link gerado com sucesso" },
+          "400": { "description": "Formato de e-mail/username inválido" }
+        }
+      }
+    },
+    "/api/auth/verify-otp": {
+      "post": {
+        "tags": ["Passwordless"],
+        "summary": "Validar Código OTP / Magic Link e Autenticar",
+        "description": "Valida o código de 6 dígitos (ou token), limpa o código usado no banco e emite a sessão com cookies HttpOnly (auth_token e refresh_token).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/VerifyOTPRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Autenticação Passwordless efetuada com sucesso" },
+          "400": { "description": "Dados incompletos" },
+          "401": { "description": "Código OTP ou Magic Link inválido ou expirado" }
+        }
+      },
+      "get": {
+        "tags": ["Passwordless"],
+        "summary": "Autenticar clicando diretamente no Magic Link",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Autenticação Passwordless efetuada com sucesso" },
+          "401": { "description": "Magic Link inválido ou expirado" }
         }
       }
     },

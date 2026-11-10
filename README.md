@@ -46,8 +46,11 @@ backend/
 | Método | Endpoint | Descrição |
 | :--- | :--- | :--- |
 | `GET` | `/api/csrf-token` | Emissão de CSRF Token (`csrf_token` cookie + header `X-CSRF-Token`) |
-| `POST` | `/api/register` | Registo de novo utilizador (com validação rigorosa, força de senha e hash bcrypt) |
-| `POST` | `/api/login` | Autenticação híbrida (email ou username), emissão de Cookies `HttpOnly` (`auth_token` e `refresh_token`) e `csrf_token` |
+| `POST` | `/api/register` | Registo de novo utilizador (`is_verified = false`) e geração de token Double Opt-In |
+| `GET / POST` | `/api/verify` | Confirmação de registo por e-mail (`?token=XYZ` ou JSON), ativando `is_verified = true` |
+| `POST` | `/api/login` | Autenticação híbrida (bloqueia se `is_verified == false`), emissão de Cookies `HttpOnly` e `csrf_token` |
+| `POST` | `/api/auth/magic-link` | **Passwordless (Passo 1):** Solicita código OTP de 6 dígitos e Magic Link (validade de 10 min) |
+| `GET / POST` | `/api/auth/verify-otp` | **Passwordless (Passo 2):** Valida o OTP/Magic Link, invalida o código usado e emite os Cookies `HttpOnly` |
 | `POST` | `/api/forgot-password` | Solicitação de recuperação de senha (geração de token temporário de 1h) |
 | `POST` | `/api/reset-password` | Redefinição de senha utilizando o token válido |
 | `GET` | `/swagger` | Documentação interativa da API (OpenAPI 3.0 / Swagger UI) |
@@ -71,6 +74,12 @@ Cada escolha técnica implementada neste projeto reflete padrões exigidos em am
 
 - **Validação Rigorosa e Força de Senha:**
   Validação estrita de formato de e-mail (`net/mail`), username e complexidade de senha (mínimo de 8 caracteres, maiúsculas, minúsculas, números e símbolos) **antes** do processamento de hash `bcrypt`, mantendo o suporte a login híbrido (e-mail ou username).
+
+- **Confirmação de Registo por E-mail (_Double Opt-In_):**
+  Novos utilizadores são criados com `is_verified = false` e recebem um token único na tabela `verification_tokens` (validade de 24 horas). O login permanece bloqueado (`403 Forbidden`) até que o token seja validado em `/api/verify`.
+
+- **Autenticação Passwordless (Magic Links & OTP de 6 dígitos):**
+  Permite login sem digitar senha: `/api/auth/magic-link` gera um código numérico criptograficamente seguro de 6 dígitos (`crypto/rand`) e um Magic Link com expiração de 10 minutos na tabela `passwordless_tokens`. Ao validar em `/api/auth/verify-otp`, o código é imediatamente apagado (impedindo reutilização) e os cookies `HttpOnly` (`auth_token` e `refresh_token`) são emitidos.
 
 - **Rate Limiting (Token Bucket):**
   Implementado com `golang.org/x/time/rate`. Protege endpoints críticos de autenticação (`/api/login`, `/api/forgot-password`, etc.) contra ataques de força bruta e abusos baseados no endereço IP do cliente.

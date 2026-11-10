@@ -64,7 +64,7 @@ func CSRFTokenHandler(w http.ResponseWriter, r *http.Request) {
 // isCSRFFreePath define rotas públicas iniciais que ainda não possuem sessão/cookie ativo
 func isCSRFFreePath(path string) bool {
 	switch path {
-	case "/api/login", "/api/register", "/api/forgot-password", "/api/reset-password":
+	case "/api/login", "/api/register", "/api/verify", "/api/auth/magic-link", "/api/auth/verify-otp", "/api/forgot-password", "/api/reset-password":
 		return true
 	default:
 		return false

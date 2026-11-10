@@ -66,7 +66,12 @@ func main() {
 	// Rotas de Autenticação e Segurança
 	mux.HandleFunc("GET /api/csrf-token", limiter.Middleware(middleware.CSRFTokenHandler))
 	mux.HandleFunc("POST /api/register", limiter.Middleware(authHandler.Register))
+	mux.HandleFunc("GET /api/verify", limiter.Middleware(authHandler.VerifyEmail))
+	mux.HandleFunc("POST /api/verify", limiter.Middleware(authHandler.VerifyEmail))
 	mux.HandleFunc("POST /api/login", limiter.Middleware(authHandler.Login))
+	mux.HandleFunc("POST /api/auth/magic-link", limiter.Middleware(authHandler.RequestMagicLink))
+	mux.HandleFunc("GET /api/auth/verify-otp", limiter.Middleware(authHandler.VerifyOTP))
+	mux.HandleFunc("POST /api/auth/verify-otp", limiter.Middleware(authHandler.VerifyOTP))
 	mux.HandleFunc("POST /api/refresh", limiter.Middleware(authHandler.Refresh))
 	mux.HandleFunc("POST /api/logout", limiter.Middleware(middleware.AuthMiddleware(authHandler.Logout)))
 	mux.HandleFunc("POST /api/forgot-password", limiter.Middleware(authHandler.ForgotPassword))

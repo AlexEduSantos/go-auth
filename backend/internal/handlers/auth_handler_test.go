@@ -110,3 +110,42 @@ func TestRegisterHandler_ValidationRejections(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifyEmailHandler_MissingToken(t *testing.T) {
+	handler := NewAuthHandler(nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/verify", nil)
+	rec := httptest.NewRecorder()
+
+	handler.VerifyEmail(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, esperado %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestGenerateOTPCode(t *testing.T) {
+	code, err := generateOTPCode()
+	if err != nil {
+		t.Fatalf("erro inesperado ao gerar OTP: %v", err)
+	}
+	if len(code) != 6 {
+		t.Errorf("esperado código de 6 dígitos, obteve %q (tamanho %d)", code, len(code))
+	}
+}
+
+func TestVerifyOTPHandler_ValidationRejections(t *testing.T) {
+	handler := NewAuthHandler(nil, nil)
+
+	// Código de 6 dígitos sem informar identifier deve retornar 400 Bad Request
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/verify-otp", bytes.NewBufferString(`{"code":"123456"}`))
+	rec := httptest.NewRecorder()
+
+	handler.VerifyOTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, esperado %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+
