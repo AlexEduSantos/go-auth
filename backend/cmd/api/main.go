@@ -20,6 +20,11 @@ import (
 )
 
 func main() {
+	// Valida e inicializa o segredo JWT a partir da variável de ambiente JWT_SECRET
+	if err := middleware.InitJWTSecret(); err != nil {
+		log.Fatalf("Erro de segurança na inicialização: %v\n", err)
+	}
+
 	dbHost := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	dbUser := os.Getenv("DB_USER")
@@ -92,8 +97,19 @@ func main() {
 		),
 	)
 
+	// Configura o servidor HTTP com Timeouts explícitos para mitigar ataques Slowloris / exaustão de conexões
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           securedMux,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
+	}
+
 	logger.Log.Info("Servidor rodando na porta 8080...")
-	if err := http.ListenAndServe(":8080", securedMux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Erro ao iniciar servidor: %v", err)
 	}
 }

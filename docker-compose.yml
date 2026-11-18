@@ -13,7 +13,6 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./backend/migrations:/docker-entrypoint-initdb.d # <--- Essencial para rodar o init.sql
     networks:
       - default
     healthcheck:
@@ -31,6 +30,8 @@ services:
     ports:
       - "8080:8080"
     environment:
+      - APP_ENV=development
+      - JWT_SECRET=chave_secreta_de_producao_com_pelo_menos_32_bytes_aqui_2026
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=go_admin

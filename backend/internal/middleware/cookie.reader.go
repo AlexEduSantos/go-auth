@@ -2,8 +2,10 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/AlexEduSantos/go-auth/internal/models"
 	"github.com/golang-jwt/jwt/v5"
@@ -18,7 +20,22 @@ const (
 	SIDKey      contextKey = "sid"
 )
 
-var jwtSecret = []byte("sua_chave_secreta_super_segura_aqui")
+var jwtSecret = []byte("chave_padrao_apenas_para_testes_unitarios_locais_32b")
+
+// InitJWTSecret carrega e valida o segredo JWT a partir da variável de ambiente JWT_SECRET.
+func InitJWTSecret() error {
+	secret := os.Getenv("JWT_SECRET")
+	if len(secret) < 32 {
+		return errors.New("a variável de ambiente JWT_SECRET é obrigatória e deve ter pelo menos 32 caracteres")
+	}
+	jwtSecret = []byte(secret)
+	return nil
+}
+
+// GetJWTSecret retorna a chave secreta JWT configurada
+func GetJWTSecret() []byte {
+	return jwtSecret
+}
 
 // 1. AuthMiddleware: lê o cookie auth_token, valida o JWT e salva os dados no Context
 func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -79,4 +96,3 @@ func RequireRole(next http.HandlerFunc, allowedRoles ...models.UserRole) http.Ha
 		http.Error(w, "Acesso negado: você não tem permissão para acessar este recurso", http.StatusForbidden)
 	}
 }
-

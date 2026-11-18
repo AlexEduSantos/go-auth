@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/mail"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -38,11 +39,14 @@ func NewAuthHandler(userRepo *repository.UserRepository, sessionRepo *repository
 }
 
 type RegisterRequest struct {
-	Username string          `json:"username"`
-	Name     string          `json:"name"`
-	Email    string          `json:"email"`
-	Password string          `json:"password"`
-	Role     models.UserRole `json:"role"`
+	Username string `json:"username"`
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+func isDevelopmentEnv() bool {
+	return os.Getenv("APP_ENV") == "development"
 }
 
 // Register cria uma nova conta de usuário.
@@ -102,18 +106,14 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Define role padrão caso não venha informada
-	role := req.Role
-	if role == "" {
-		role = models.RoleUser
-	}
-
+	// Prevenção contra Mass Assignment (Escalada de Privilégios):
+	// O registo público cria sempre utilizadores com a role padrão USER.
 	user := &models.User{
 		Username:   req.Username,
 		Name:       req.Name,
 		Email:      req.Email,
 		Password:   string(hashedPassword),
-		Role:       role,
+		Role:       models.RoleUser,
 		IsVerified: false,
 	}
 
@@ -156,13 +156,17 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// NOTA REAL: Aqui você integraria o serviço de envio de e-mail (SMTP / Resend / SendGrid) com verifyLink.
+	resp := map[string]interface{}{
+		"message": "Registo efetuado! Por favor, confirme o seu e-mail através do link enviado.",
+		"user":    user,
+	}
+	if isDevelopmentEnv() {
+		resp["verification_link"] = verifyLink
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":           "Registo efetuado! Por favor, confirme o seu e-mail através do link enviado.",
-		"user":              user,
-		"verification_link": verifyLink, // Exposto para facilitar testes em desenvolvimento
-	})
+	json.NewEncoder(w).Encode(resp)
 }
 
 // VerifyEmail confirma o registo do utilizador (Double Opt-In) via GET (?token=XYZ) ou POST JSON.
@@ -218,8 +222,6 @@ func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 		"message": "E-mail confirmado com sucesso! Já pode efetuar o login.",
 	})
 }
-
-var jwtSecret = []byte("sua_chave_secreta_super_segura_aqui")
 
 type LoginRequest struct {
 	Identifier string `json:"identifier"` // Pode ser email ou username
@@ -342,7 +344,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(jwtSecret)
+	tokenString, err := token.SignedString(middleware.GetJWTSecret())
 	if err != nil {
 		http.Error(w, "Erro ao gerar token de autenticação", http.StatusInternalServerError)
 		return
@@ -453,7 +455,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(jwtSecret)
+	tokenString, err := token.SignedString(middleware.GetJWTSecret())
 	if err != nil {
 		http.Error(w, "Erro ao gerar novo access token", http.StatusInternalServerError)
 		return
@@ -525,7 +527,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	// 2. Faz o parse e valida o token JWT para extrair as claims (ex: sid)
 	claims := jwt.MapClaims{}
 	token, err := jwt.ParseWithClaims(cookie.Value, claims, func(token *jwt.Token) (interface{}, error) {
-		return jwtSecret, nil
+		return middleware.GetJWTSecret(), nil
 	})
 
 	if err != nil || !token.Valid {
@@ -766,13 +768,17 @@ func (h *AuthHandler) RequestMagicLink(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// NOTA REAL: Aqui você enviaria o e-mail contendo o otpCode (6 dígitos) e o magicLink.
+	resp := map[string]string{
+		"message": "Se a conta existir, um código OTP e um Magic Link foram enviados para o seu e-mail.",
+	}
+	if isDevelopmentEnv() {
+		resp["debug_otp"] = otpCode
+		resp["debug_magic_link"] = magicLink
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"message":          "Se a conta existir, um código OTP e um Magic Link foram enviados para o seu e-mail.",
-		"debug_otp":        otpCode,   // Exposto para testes em desenvolvimento
-		"debug_magic_link": magicLink, // Exposto para testes em desenvolvimento
-	})
+	json.NewEncoder(w).Encode(resp)
 }
 
 // VerifyOTP valida o código OTP de 6 dígitos (ou o Magic Link), invalida o código usado e autentica o utilizador
@@ -866,7 +872,7 @@ func (h *AuthHandler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(jwtSecret)
+	tokenString, err := token.SignedString(middleware.GetJWTSecret())
 	if err != nil {
 		http.Error(w, "Erro ao gerar token de autenticação", http.StatusInternalServerError)
 		return
@@ -959,13 +965,16 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// NOTA REAL: Aqui você integraria o envio do e-mail com o link contendo o token (ex: /reset-password?token=XYZ)
-	// Para fins de desenvolvimento/teste, podemos retornar o token na resposta:
+	resp := map[string]string{
+		"message": "Se o email estiver registado, instruções foram enviadas.",
+	}
+	if isDevelopmentEnv() {
+		resp["debug_token"] = token
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"message":     "Se o email estiver registado, instruções foram enviadas.",
-		"debug_token": token, // Remova esta linha em produção por segurança!
-	})
+	json.NewEncoder(w).Encode(resp)
 }
 
 // 2. Redefinir a senha usando o token

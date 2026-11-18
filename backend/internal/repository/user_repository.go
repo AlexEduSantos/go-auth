@@ -180,7 +180,7 @@ func (r *UserRepository) SavePasswordlessToken(ctx context.Context, userID, otpC
 }
 
 // ConsumePasswordlessToken valida um código OTP de 6 dígitos (associado ao email/username) ou um Magic Token,
-// apaga imediatamente o registo para impedir reutilização, garante is_verified = true e retorna o utilizador.
+// protege contra força bruta (máximo de 5 tentativas), apaga imediatamente o registo após uso e retorna o utilizador.
 func (r *UserRepository) ConsumePasswordlessToken(ctx context.Context, identifier, codeOrToken string) (*models.User, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -199,6 +199,7 @@ func (r *UserRepository) ConsumePasswordlessToken(ctx context.Context, identifie
 			JOIN users u ON u.id = pt.user_id
 			WHERE (u.email = $1 OR u.username = $1)
 			  AND (pt.otp_code = $2 OR pt.magic_token = $2)
+			  AND pt.attempts < 5
 			  AND pt.expires_at > CURRENT_TIMESTAMP
 		`
 		args = []interface{}{identifier, codeOrToken}
@@ -208,6 +209,7 @@ func (r *UserRepository) ConsumePasswordlessToken(ctx context.Context, identifie
 			FROM passwordless_tokens pt
 			JOIN users u ON u.id = pt.user_id
 			WHERE pt.magic_token = $1
+			  AND pt.attempts < 5
 			  AND pt.expires_at > CURRENT_TIMESTAMP
 		`
 		args = []interface{}{codeOrToken}
@@ -225,6 +227,19 @@ func (r *UserRepository) ConsumePasswordlessToken(ctx context.Context, identifie
 		&user.UpdatedAt,
 	)
 	if err != nil {
+		// Incrementa o contador de tentativas falhas e invalida o token se atingir 5 erros
+		if identifier != "" {
+			_, _ = r.db.Exec(ctx, `
+				UPDATE passwordless_tokens
+				SET attempts = attempts + 1
+				WHERE user_id = (SELECT id FROM users WHERE email = $1 OR username = $1)
+			`, identifier)
+			_, _ = r.db.Exec(ctx, `
+				DELETE FROM passwordless_tokens
+				WHERE user_id = (SELECT id FROM users WHERE email = $1 OR username = $1)
+				  AND attempts >= 5
+			`, identifier)
+		}
 		return nil, err
 	}
 

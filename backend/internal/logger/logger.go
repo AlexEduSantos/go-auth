@@ -3,7 +3,6 @@ package logger
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -72,12 +71,12 @@ func StartLogCleanup(ctx context.Context, db *pgxpool.Pool, interval time.Durati
 	go func() {
 		defer ticker.Stop()
 
-		query := fmt.Sprintf(`DELETE FROM app_logs WHERE created_at < NOW() - INTERVAL '%d days'`, retentionDays)
+		query := `DELETE FROM app_logs WHERE created_at < NOW() - ($1 * INTERVAL '1 day')`
 
 		for {
 			select {
 			case <-ticker.C:
-				if _, err := db.Exec(ctx, query); err != nil {
+				if _, err := db.Exec(ctx, query, retentionDays); err != nil {
 					log.Printf("[Worker] Erro ao limpar logs antigos: %v\n", err)
 				} else {
 					log.Println("[Worker] Logs antigos limpos com sucesso.")
